@@ -1,0 +1,22 @@
+# Build rezultati
+bin/
+obj/
+
+# Visual Studio
+.vs/
+
+# User settings
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider / JetBrains
+.idea/
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
