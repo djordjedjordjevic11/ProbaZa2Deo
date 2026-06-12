@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Net;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace PalindromeServer
 {
@@ -9,67 +10,66 @@ namespace PalindromeServer
     {
         private readonly Queue<HttpListenerContext> _queue;
         private readonly object _queueLock = new object();
+        private readonly SemaphoreSlim _itemAvailable;
+        private readonly SemaphoreSlim _spaceAvailable;
         private readonly int _maxSize;
-        private bool _isStopped = false;
+        private volatile bool _isStopped = false;
 
         public RequestQueue(int maxSize = 100)
         {
             _maxSize = maxSize;
             _queue = new Queue<HttpListenerContext>();
+            // signalizira da ima zahteva u redu
+            _itemAvailable = new SemaphoreSlim(0, maxSize);
+            // signalizira da ima mesta u redu
+            _spaceAvailable = new SemaphoreSlim(maxSize, maxSize);
         }
 
         // Zove je AcceptThread - stavlja zahtev u red
-        public bool EnqueueContext(HttpListenerContext context)
+        public async Task EnqueueAsync(HttpListenerContext context)
         {
+            // Cekamo slobodno mesto - async, ne blokira nit
+            await _spaceAvailable.WaitAsync();
+
+            if (_isStopped) return;
+
             lock (_queueLock)
             {
-                if (_isStopped) return false;
-
-                // Cekamo dok se ne oslobodi mesto u redu
-                while (_queue.Count >= _maxSize && !_isStopped)
-                {
-                    Logger.Log($"RED PUN ({_queue.Count}/{_maxSize}): Producer ceka...");
-                    Monitor.Wait(_queueLock);
-                }
-
-                if (_isStopped) return false;
-
                 _queue.Enqueue(context);
                 Logger.Log($"RED: Dodat zahtev, u redu: {_queue.Count}/{_maxSize}");
-                Monitor.Pulse(_queueLock);
-                return true;
             }
+
+            // Signaliziramo da ima novog zahteva
+            _itemAvailable.Release();
         }
 
         // Zove je DispatchThread - uzima zahtev iz reda
-        public HttpListenerContext? Dequeue()
+        public async Task<HttpListenerContext?> DequeueAsync()
         {
+            // Cekamo da se pojavi zahtev - async, ne blokira nit
+            await _itemAvailable.WaitAsync();
+
+            if (_isStopped) return null;
+
+            HttpListenerContext context;
             lock (_queueLock)
             {
-                // Cekamo dok ne stigne neki zahtev
-                while (_queue.Count == 0 && !_isStopped)
-                {
-                    Logger.Log("RED PRAZAN: Consumer ceka...");
-                    Monitor.Wait(_queueLock);
-                }
-
-                if (_queue.Count == 0) return null;
-
-                HttpListenerContext context = _queue.Dequeue();
+                context = _queue.Dequeue();
                 Logger.Log($"RED: Uzet zahtev, ostalo: {_queue.Count}/{_maxSize}");
-                Monitor.Pulse(_queueLock);
-                return context;
             }
+
+            // Signaliziramo da se oslobodilo mesto
+            _spaceAvailable.Release();
+            return context;
         }
 
         public void Stop()
         {
-            lock (_queueLock)
-            {
-                _isStopped = true;
-                Monitor.PulseAll(_queueLock);
-                Logger.Log("RED: Zaustavljanje");
-            }
+            _isStopped = true;
+            // Budimo sve cekajuce operacije
+            _itemAvailable.Release(_maxSize);
+            _spaceAvailable.Release(_maxSize);
+            Logger.Log("RED: Zaustavljanje");
         }
 
         public int Count
